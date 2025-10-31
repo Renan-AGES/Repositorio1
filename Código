@@ -1,0 +1,431 @@
+import javax.swing.*;
+import javax.swing.table.DefaultTableModel;
+import java.awt.*;
+import java.sql.*;
+import java.time.LocalDate;
+import java.util.Vector;
+import java.security.SecureRandom;
+import java.security.MessageDigest;
+import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.PBEKeySpec;
+
+public class SimplePM {
+    public static final String DB_URL = "jdbc:mysql://localhost:3306/simple_pm?useSSL=false&serverTimezone=UTC";
+    public static final String DB_USER = "root";
+    public static final String DB_PASS = "password";
+
+    public static void main(String[] args) {
+        try {
+            DB.initSchema();
+        } catch (Exception ex) {
+            ex.printStackTrace();
+            JOptionPane.showMessageDialog(null, "Erro ao inicializar banco: " + ex.getMessage());
+            System.exit(1);
+        }
+
+        try {
+            if (!Auth.userExists("admin")) {
+                Auth.registerUser("Admin Default", "00000000000", "admin@example.com", "ADMIN", "admin", "admin123");
+                System.out.println("Usuário admin criado: login=admin, senha=admin123");
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        SwingUtilities.invokeLater(() -> {
+            LoginFrame lf = new LoginFrame();
+            lf.setVisible(true);
+        });
+    }
+
+    static class DB {
+        static Connection conn() throws SQLException {
+            return DriverManager.getConnection(DB_URL, DB_USER, DB_PASS);
+        }
+
+        static void initSchema() throws SQLException {
+            try (Connection c = conn(); Statement s = c.createStatement()) {
+                s.execute(
+                    "CREATE TABLE IF NOT EXISTS users (" +
+                    "id INT AUTO_INCREMENT PRIMARY KEY," +
+                    "name VARCHAR(120) NOT NULL," +
+                    "cpf VARCHAR(20)," +
+                    "email VARCHAR(120)," +
+                    "role ENUM('ADMIN','MANAGER','COLLAB') NOT NULL DEFAULT 'COLLAB'," +
+                    "login VARCHAR(60) NOT NULL UNIQUE," +
+                    "password_hash VARBINARY(256) NOT NULL," +
+                    "salt VARBINARY(64) NOT NULL," +
+                    "created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
+                );
+                s.execute(
+                    "CREATE TABLE IF NOT EXISTS projects (" +
+                    "id INT AUTO_INCREMENT PRIMARY KEY," +
+                    "name VARCHAR(150) NOT NULL," +
+                    "description TEXT," +
+                    "start_date DATE," +
+                    "end_date DATE," +
+                    "status ENUM('PLANEJADO','EM_ANDAMENTO','CONCLUIDO','CANCELADO') DEFAULT 'PLANEJADO'," +
+                    "manager_id INT," +
+                    "created_at DATETIME DEFAULT CURRENT_TIMESTAMP," +
+                    "FOREIGN KEY (manager_id) REFERENCES users(id) ON DELETE SET NULL)"
+                );
+                s.execute(
+                    "CREATE TABLE IF NOT EXISTS history (" +
+                    "id INT AUTO_INCREMENT PRIMARY KEY," +
+                    "entity_type VARCHAR(50) NOT NULL," +
+                    "entity_id INT NOT NULL," +
+                    "changed_by INT," +
+                    "new_status VARCHAR(100)," +
+                    "change_date DATETIME DEFAULT CURRENT_TIMESTAMP," +
+                    "FOREIGN KEY (changed_by) REFERENCES users(id) ON DELETE SET NULL)"
+                );
+            }
+        }
+    }
+
+    static class Auth {
+        private static final SecureRandom RAND = new SecureRandom();
+        private static final int ITER = 10000;
+        private static final int KEYLEN = 256;
+
+        public static byte[] pbkdf2(char[] password, byte[] salt) throws Exception {
+            PBEKeySpec spec = new PBEKeySpec(password, salt, ITER, KEYLEN);
+            SecretKeyFactory skf = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
+            return skf.generateSecret(spec).getEncoded();
+        }
+
+        public static boolean userExists(String login) throws SQLException {
+            String sql = "SELECT id FROM users WHERE login = ?";
+            try (Connection c = DB.conn(); PreparedStatement p = c.prepareStatement(sql)) {
+                p.setString(1, login);
+                try (ResultSet r = p.executeQuery()) {
+                    return r.next();
+                }
+            }
+        }
+
+        public static void registerUser(String name, String cpf, String email, String role, String login, String password) throws Exception {
+            byte[] salt = new byte[16];
+            RAND.nextBytes(salt);
+            byte[] hash = pbkdf2(password.toCharArray(), salt);
+            String sql = "INSERT INTO users (name, cpf, email, role, login, password_hash, salt) VALUES (?,?,?,?,?,?,?)";
+            try (Connection c = DB.conn(); PreparedStatement p = c.prepareStatement(sql)) {
+                p.setString(1, name);
+                p.setString(2, cpf);
+                p.setString(3, email);
+                p.setString(4, role);
+                p.setString(5, login);
+                p.setBytes(6, hash);
+                p.setBytes(7, salt);
+                p.executeUpdate();
+            }
+        }
+
+        public static int authenticate(String login, String password) throws Exception {
+            String sql = "SELECT id, password_hash, salt FROM users WHERE login = ?";
+            try (Connection c = DB.conn(); PreparedStatement p = c.prepareStatement(sql)) {
+                p.setString(1, login);
+                try (ResultSet r = p.executeQuery()) {
+                    if (!r.next()) return -1;
+                    byte[] hash = r.getBytes("password_hash");
+                    byte[] salt = r.getBytes("salt");
+                    byte[] attempt = pbkdf2(password.toCharArray(), salt);
+                    if (MessageDigestIsEqual(hash, attempt)) {
+                        return r.getInt("id");
+                    } else return -1;
+                }
+            }
+        }
+
+        private static boolean MessageDigestIsEqual(byte[] a, byte[] b) {
+            if (a.length != b.length) return false;
+            int res = 0;
+            for (int i = 0; i < a.length; i++) res |= a[i] ^ b[i];
+            return res == 0;
+        }
+
+        public static String getRole(int userId) throws SQLException {
+            String sql = "SELECT role FROM users WHERE id = ?";
+            try (Connection c = DB.conn(); PreparedStatement p = c.prepareStatement(sql)) {
+                p.setInt(1, userId);
+                try (ResultSet r = p.executeQuery()) {
+                    if (r.next()) return r.getString("role");
+                    return null;
+                }
+            }
+        }
+    }
+
+    static class LoginFrame extends JFrame {
+        JTextField loginField = new JTextField(20);
+        JPasswordField passField = new JPasswordField(20);
+
+        LoginFrame() {
+            super("SimplePM - Login");
+            setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+            setSize(360,180);
+            setLocationRelativeTo(null);
+            setLayout(new BorderLayout());
+
+            JPanel p = new JPanel(new GridLayout(3,2,6,6));
+            p.setBorder(BorderFactory.createEmptyBorder(10,10,10,10));
+            p.add(new JLabel("Login:"));
+            p.add(loginField);
+            p.add(new JLabel("Senha:"));
+            p.add(passField);
+
+            JButton btnLogin = new JButton("Entrar");
+            JButton btnRegister = new JButton("Registrar (rápido)");
+            JPanel btns = new JPanel();
+            btns.add(btnLogin);
+            btns.add(btnRegister);
+
+            add(p, BorderLayout.CENTER);
+            add(btns, BorderLayout.SOUTH);
+
+            btnLogin.addActionListener(e -> doLogin());
+            btnRegister.addActionListener(e -> doQuickRegister());
+        }
+
+        private void doQuickRegister() {
+            String login = JOptionPane.showInputDialog(this, "Novo login:");
+            if (login == null || login.trim().isEmpty()) return;
+            String name = JOptionPane.showInputDialog(this, "Nome completo:");
+            if (name == null) name = login;
+            String pass = JOptionPane.showInputDialog(this, "Senha:");
+            if (pass == null) return;
+            try {
+                if (Auth.userExists(login)) {
+                    JOptionPane.showMessageDialog(this, "Login já existe.");
+                    return;
+                }
+                Auth.registerUser(name,"", "", "COLLAB", login, pass);
+                JOptionPane.showMessageDialog(this, "Usuário registrado. Faça login.");
+            } catch (Exception ex) {
+                ex.printStackTrace();
+                JOptionPane.showMessageDialog(this, "Erro: " + ex.getMessage());
+            }
+        }
+
+        private void doLogin() {
+            String login = loginField.getText().trim();
+            String pass = new String(passField.getPassword());
+            try {
+                int uid = Auth.authenticate(login, pass);
+                if (uid == -1) {
+                    JOptionPane.showMessageDialog(this, "Credenciais inválidas.");
+                    return;
+                }
+                String role = Auth.getRole(uid);
+                ProjectFrame pf = new ProjectFrame(uid, role);
+                pf.setVisible(true);
+                this.dispose();
+            } catch (Exception ex) {
+                ex.printStackTrace();
+                JOptionPane.showMessageDialog(this, "Erro: " + ex.getMessage());
+            }
+        }
+    }
+
+    static class ProjectFrame extends JFrame {
+        int userId;
+        String role;
+        DefaultTableModel model;
+        JTable table;
+
+        ProjectFrame(int userId, String role) {
+            super("SimplePM - Projetos (usuário " + userId + " | " + role + ")");
+            this.userId = userId;
+            this.role = role;
+            setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+            setSize(800,400);
+            setLocationRelativeTo(null);
+
+            model = new DefaultTableModel();
+            model.setColumnIdentifiers(new String[]{"ID","Nome","Início","Término","Status","Gerente ID"});
+            table = new JTable(model);
+            refreshProjects();
+
+            JScrollPane sp = new JScrollPane(table);
+            add(sp, BorderLayout.CENTER);
+
+            JPanel top = new JPanel();
+            JButton btnAdd = new JButton("Novo Projeto");
+            JButton btnEdit = new JButton("Editar (somente se for gerente/admin)");
+            JButton btnCancel = new JButton("Cancelar projeto");
+            JButton btnRefresh = new JButton("Atualizar");
+
+            top.add(btnAdd);
+            top.add(btnEdit);
+            top.add(btnCancel);
+            top.add(btnRefresh);
+            add(top, BorderLayout.NORTH);
+
+            btnAdd.addActionListener(e -> doAddProject());
+            btnRefresh.addActionListener(e -> refreshProjects());
+            btnEdit.addActionListener(e -> doEditProject());
+            btnCancel.addActionListener(e -> doCancelProject());
+        }
+
+        private void refreshProjects() {
+            model.setRowCount(0);
+            String sql = "SELECT id,name,start_date,end_date,status,manager_id FROM projects ORDER BY id DESC";
+            try (Connection c = DB.conn(); PreparedStatement p = c.prepareStatement(sql); ResultSet r = p.executeQuery()) {
+                while (r.next()) {
+                    Vector<Object> row = new Vector<>();
+                    row.add(r.getInt("id"));
+                    row.add(r.getString("name"));
+                    row.add(r.getDate("start_date"));
+                    row.add(r.getDate("end_date"));
+                    row.add(r.getString("status"));
+                    row.add(r.getObject("manager_id"));
+                    model.addRow(row);
+                }
+            } catch (Exception ex) {
+                ex.printStackTrace();
+                JOptionPane.showMessageDialog(this, "Erro ao carregar projetos: " + ex.getMessage());
+            }
+        }
+
+        private void doAddProject() {
+            JTextField nameF = new JTextField();
+            JTextField startF = new JTextField(LocalDate.now().toString());
+            JTextField endF = new JTextField();
+            JTextArea descA = new JTextArea(5,30);
+            JTextField managerIdF = new JTextField(String.valueOf(this.userId));
+
+            JPanel p = new JPanel(new BorderLayout());
+            JPanel fields = new JPanel(new GridLayout(4,2,6,6));
+            fields.add(new JLabel("Nome:")); fields.add(nameF);
+            fields.add(new JLabel("Start (YYYY-MM-DD):")); fields.add(startF);
+            fields.add(new JLabel("End (YYYY-MM-DD):")); fields.add(endF);
+            fields.add(new JLabel("Manager ID:")); fields.add(managerIdF);
+            p.add(fields, BorderLayout.NORTH);
+            p.add(new JScrollPane(descA), BorderLayout.CENTER);
+
+            int res = JOptionPane.showConfirmDialog(this, p, "Novo Projeto", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+            if (res != JOptionPane.OK_OPTION) return;
+
+            String name = nameF.getText().trim();
+            String start = startF.getText().trim();
+            String end = endF.getText().trim();
+            String desc = descA.getText().trim();
+            Integer managerId;
+            try {
+                managerId = Integer.valueOf(managerIdF.getText().trim());
+            } catch (Exception ex) {
+                managerId = null;
+            }
+
+            try (Connection c = DB.conn()) {
+                String sql = "INSERT INTO projects (name, description, start_date, end_date, status, manager_id) VALUES (?,?,?,?,?,?)";
+                try (PreparedStatement pstm = c.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+                    pstm.setString(1, name);
+                    pstm.setString(2, desc.isEmpty() ? null : desc);
+                    if (start.isEmpty()) pstm.setNull(3, Types.DATE); else pstm.setDate(3, Date.valueOf(start));
+                    if (end.isEmpty()) pstm.setNull(4, Types.DATE); else pstm.setDate(4, Date.valueOf(end));
+                    pstm.setString(5, "PLANEJADO");
+                    if (managerId == null) pstm.setNull(6, Types.INTEGER); else pstm.setInt(6, managerId);
+                    pstm.executeUpdate();
+                    try (ResultSet g = pstm.getGeneratedKeys()) {
+                        if (g.next()) {
+                            int pid = g.getInt(1);
+                            logHistory("project", pid, this.userId, "PLANEJADO");
+                        }
+                    }
+                }
+                JOptionPane.showMessageDialog(this, "Projeto criado.");
+                refreshProjects();
+            } catch (Exception ex) {
+                ex.printStackTrace();
+                JOptionPane.showMessageDialog(this, "Erro ao criar projeto: " + ex.getMessage());
+            }
+        }
+
+        private void doEditProject() {
+            int r = table.getSelectedRow();
+            if (r == -1) {
+                JOptionPane.showMessageDialog(this, "Selecione um projeto.");
+                return;
+            }
+            int pid = (int) model.getValueAt(r, 0);
+            try {
+                String sql = "SELECT manager_id, name, description, start_date, end_date, status FROM projects WHERE id = ?";
+                try (Connection c = DB.conn(); PreparedStatement p = c.prepareStatement(sql)) {
+                    p.setInt(1, pid);
+                    try (ResultSet rs = p.executeQuery()) {
+                        if (!rs.next()) {
+                            JOptionPane.showMessageDialog(this, "Projeto não encontrado.");
+                            return;
+                        }
+                        Integer managerId = (Integer) rs.getObject("manager_id");
+                        if (!"ADMIN".equals(role) && !(managerId != null && managerId == userId)) {
+                            JOptionPane.showMessageDialog(this, "Apenas administrador ou gerente responsável pode editar.");
+                            return;
+                        }
+                        String name = rs.getString("name");
+                        String desc = rs.getString("description");
+                        Date sd = rs.getDate("start_date");
+                        Date ed = rs.getDate("end_date");
+                        String status = rs.getString("status");
+
+                        JTextField nameF = new JTextField(name);
+                        JTextField startF = new JTextField(sd==null ? "" : sd.toString());
+                        JTextField endF = new JTextField(ed==null ? "" : ed.toString());
+                        JTextArea descA = new JTextArea(desc==null ? "" : desc,5,30);
+                        JComboBox<String> statusC = new JComboBox<>(new String[]{"PLANEJADO","EM_ANDAMENTO","CONCLUIDO","CANCELADO"});
+                        statusC.setSelectedItem(status);
+
+                        JPanel pPanel = new JPanel(new BorderLayout());
+                        JPanel fields = new JPanel(new GridLayout(4,2,6,6));
+                        fields.add(new JLabel("Nome:")); fields.add(nameF);
+                        fields.add(new JLabel("Start (YYYY-MM-DD):")); fields.add(startF);
+                        fields.add(new JLabel("End (YYYY-MM-DD):")); fields.add(endF);
+                        fields.add(new JLabel("Status:")); fields.add(statusC);
+                        pPanel.add(fields, BorderLayout.NORTH);
+                        pPanel.add(new JScrollPane(descA), BorderLayout.CENTER);
+
+                        int res = JOptionPane.showConfirmDialog(this, pPanel, "Editar Projeto", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+                        if (res != JOptionPane.OK_OPTION) return;
+
+                        try (Connection c2 = DB.conn()) {
+                            String up = "UPDATE projects SET name=?, description=?, start_date=?, end_date=?, status=? WHERE id=?";
+                            try (PreparedStatement upst = c2.prepareStatement(up)) {
+                                upst.setString(1, nameF.getText().trim());
+                                upst.setString(2, descA.getText().trim());
+                                String sstart = startF.getText().trim();
+                                String send = endF.getText().trim();
+                                if (sstart.isEmpty()) upst.setNull(3, Types.DATE); else upst.setDate(3, Date.valueOf(sstart));
+                                if (send.isEmpty()) upst.setNull(4, Types.DATE); else upst.setDate(4, Date.valueOf(send));
+                                upst.setString(5, (String)statusC.getSelectedItem());
+                                upst.setInt(6, pid);
+                                upst.executeUpdate();
+                            }
+                            logHistory("project", pid, this.userId, (String)statusC.getSelectedItem());
+                            JOptionPane.showMessageDialog(this, "Projeto atualizado.");
+                            refreshProjects();
+                        }
+                    }
+                }
+            } catch (Exception ex) {
+                ex.printStackTrace();
+                JOptionPane.showMessageDialog(this, "Erro ao editar: " + ex.getMessage());
+            }
+        }
+
+        private void doCancelProject() {
+            int r = table.getSelectedRow();
+            if (r == -1) {
+                JOptionPane.showMessageDialog(this, "Selecione um projeto.");
+                return;
+            }
+         int pid = (int) model.getValueAt(r, 0);
+            int confirm = JOptionPane.showConfirmDialog(this, "Confirmar cancelamento do projeto " + pid + " ?", "Confirmar", JOptionPane.YES_NO_OPTION);
+            if (confirm != JOptionPane.YES_OPTION) return;
+            try (Connection c = DB.conn()) {
+                String up = "UPDATE projects SET status = 'CANCELADO' WHERE id = ?";
+                try (PreparedStatement p = c.prepareStatement(up)) {
+                    p.setInt(1, pid);
+                    p.executeUpdate();
+                }
+                logHistory
