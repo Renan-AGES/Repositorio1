@@ -1,0 +1,43 @@
+CREATE DATABASE IF NOT EXISTS simple_pm CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+USE simple_pm;
+
+CREATE TABLE IF NOT EXISTS users (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(120) NOT NULL,
+  cpf VARCHAR(20),
+  email VARCHAR(120),
+  role VARCHAR(20) CHECK (role IN ('ADMIN','MANAGER','COLLAB')) DEFAULT 'COLLAB',
+  login VARCHAR(60) NOT NULL UNIQUE,
+  password_hash VARBINARY(256) NOT NULL,
+  salt VARBINARY(64) NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS projects (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(150) NOT NULL,
+  description TEXT,
+  start_date DATE,
+  end_date DATE,
+  status VARCHAR(20) CHECK (status IN ('PLANEJADO','EM_ANDAMENTO','CONCLUIDO','CANCELADO')) DEFAULT 'PLANEJADO',
+  manager_id INT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (manager_id) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS history (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  entity_type VARCHAR(50) NOT NULL,
+  entity_id INT NOT NULL,
+  changed_by INT,
+  new_status VARCHAR(100),
+  change_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (changed_by) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE
+);
+
+CREATE INDEX idx_projects_manager_id ON projects(manager_id);
+CREATE INDEX idx_history_entity ON history(entity_type, entity_id);
+
+INSERT INTO users (name, cpf, email, role, login, password_hash, salt)
+VALUES ('Administrador', '000.000.000-00', 'admin@example.com', 'ADMIN', 'admin', UNHEX(SHA2('admin123', 256)), UNHEX('00'))
+ON DUPLICATE KEY UPDATE login=login;
